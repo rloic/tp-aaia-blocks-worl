@@ -1,92 +1,112 @@
-use crate::Problem;
+use crate::NonUniformProblem;
 use std::fmt::{Debug, Formatter, Write};
 use std::fmt;
+use std::ops::Range;
+use crate::algorithms::{Cost, WeightedAction};
 
 pub type Stack = usize;
+pub type Stacks = Range<Stack>;
 pub type Block = usize;
+pub type Blocks = Range<Block>;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash)]
 pub struct WorldBlocks {
     pub stack: Vec<Stack>,
-    pub under: Vec<Block>,
-    pub top: Vec<Block>,
+    pub next: Vec<Option<Block>>,
+    pub top: Vec<Option<Block>>,
 }
 
-#[derive(Clone)]
-pub struct WorldBlocksMove { from: Stack, to: Stack }
+impl PartialEq for WorldBlocks {
+    fn eq(&self, other: &Self) -> bool {
+        assert_eq!(self.nb_blocks(), other.nb_blocks());
+        assert_eq!(self.nb_stacks(), other.nb_stacks());
+        for block in self.blocks() {
+            if self.stack[block as usize] != other.stack[block as usize] {
+                return false;
+            }
+            if self.next[block as usize] != other.next[block as usize] {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct Move { from: Stack, to: Stack }
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NbMoves(u32);
+
+impl NbMoves {
+    pub fn new(nb_moves: u32) -> Self {
+        NbMoves(nb_moves)
+    }
+}
+
+impl Cost for NbMoves {
+    fn best() -> Self {
+        NbMoves(0)
+    }
+
+    fn is_better_than(&self, other: &Self) -> bool {
+        self.0 < other.0
+    }
+
+    fn is_worst_than(&self, other: &Self) -> bool {
+        self.0 > other.0
+    }
+
+    fn aggregate(&self, other: &Self) -> Self {
+        NbMoves(self.0 + other.0)
+    }
+}
 
 impl WorldBlocks {
-    pub fn new(nb_blocks: usize, nb_stacks: usize) -> Self {
-        let mut top: Vec<Block> = vec![nb_blocks; nb_stacks];
-        let mut stack: Vec<Stack> = vec![0; nb_blocks];
-        let mut under: Vec<Block> = vec![0; nb_blocks];
-        for block in 0..nb_blocks {
-            let s = block % nb_stacks;
-            stack[block] = s;
-            under[block] = top[s];
-            top[s] = block as Block;
+    pub fn initial(nb_blocks: usize, nb_stacks: usize) -> Self {
+        let mut top = vec![None; nb_stacks];
+        let mut stack = Vec::with_capacity(nb_blocks);
+        let mut under = vec![None; nb_blocks];
+        for block in 0..nb_blocks as Block {
+            let s = block % nb_stacks as Stack;
+            stack.push(s);
+            under[block as usize] = top[s as usize];
+            top[s as usize] = Some(block);
         }
-        WorldBlocks { stack, under, top }
+        WorldBlocks { stack, next: under, top }
     }
 
-    pub fn new_solution(nb_blocks: usize, nb_stacks: usize) -> Self {
-        let mut top: Vec<Block> = vec![nb_blocks; nb_stacks];
-        let mut stack: Vec<Stack> = vec![0; nb_blocks];
-        let mut under: Vec<Block> = vec![0; nb_blocks];
-        top[nb_stacks - 1] = 0;
-        for block in 0..nb_blocks {
-            stack[block] = nb_stacks - 1;
-            under[block] = block + 1;
-        }
-        WorldBlocks { stack, under, top }
-    }
-
-    #[inline]
-    pub fn table(&self) -> Block {
-        self.nb_blocks()
-    }
-
-    #[inline]
     pub fn nb_blocks(&self) -> usize {
-        self.under.len()
+        self.next.len()
     }
 
-    #[inline]
     pub fn nb_stacks(&self) -> usize {
         self.top.len()
     }
 
-    #[inline]
-    pub fn last_stack(&self) -> Stack {
-        self.nb_stacks() - 1
+    pub fn stacks(&self) -> Stacks {
+        0..self.nb_stacks() as Stack
     }
 
-    pub fn stack_len(&self, stack: Stack) -> usize {
-        let mut block = self.top[stack];
-        let mut len = 0;
-        while block != self.table() {
-            len += 1;
-            block = self.under[block];
-        }
-        len
-    }
-
-    #[inline]
     pub fn is_not_empty_stack(&self, stack: Stack) -> bool {
-        self.top[stack] != self.table()
+        self.top[stack as usize].is_some()
     }
 
-    #[inline]
+    #[allow(dead_code)]
     pub fn is_empty_stack(&self, stack: Stack) -> bool {
-        self.top[stack] == self.table()
+        self.top[stack as usize].is_none()
+    }
+
+    pub fn blocks(&self) -> Blocks {
+        0..self.nb_blocks() as Block
     }
 }
 
 impl Debug for WorldBlocks {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        fn display_block_stack(f: &mut Formatter<'_>, s: &WorldBlocks, block: Block, next: &Vec<Block>) -> fmt::Result {
-            if block != s.table() {
-                display_block_stack(f, s, next[block], next)?;
+        fn display_block_stack(f: &mut Formatter<'_>, s: &WorldBlocks, block: Option<Block>, next: &Vec<Option<Block>>) -> fmt::Result {
+            if let Some(block) = block {
+                display_block_stack(f, s, next[block as usize], next)?;
                 f.write_fmt(format_args!("{} ", block))?;
             }
             Ok(())
@@ -94,7 +114,7 @@ impl Debug for WorldBlocks {
 
         for stack in 0..self.nb_stacks() {
             f.write_fmt(format_args!("stack {}: ", stack))?;
-            display_block_stack(f, self, self.top[stack], &self.under)?;
+            display_block_stack(f, self, self.top[stack], &self.next)?;
             f.write_char('\n')?;
         }
 
@@ -102,32 +122,36 @@ impl Debug for WorldBlocks {
     }
 }
 
-impl Problem<WorldBlocksMove> for WorldBlocks {
-    fn apply(&mut self, action: &WorldBlocksMove) {
-        let b1 = self.top[action.from];
-        let bb1 = self.under[b1];
-        let b2 = self.top[action.to];
-        self.under[b1] = b2;
-        self.top[action.to] = b1;
-        self.top[action.from] = bb1;
-        self.stack[b1] = action.to;
+impl NonUniformProblem<Move, NbMoves> for WorldBlocks {
+    fn apply(&mut self, action: &Move) {
+        if let Some(moved_block) = self.top[action.from as usize] {
+            // The new top of the stack from is the block under the moved_block
+            let new_top = self.next[moved_block as usize];
+            self.top[action.from as usize] = new_top;
+
+            // Move the block to it new position
+            self.next[moved_block as usize] = self.top[action.to as usize];
+            self.top[action.to as usize] = Some(moved_block);
+            self.stack[moved_block as usize] = action.to;
+        } else {
+            panic!("Try to pick a block on an empty stack");
+        }
     }
 
-    #[inline]
-    fn restore(&mut self, action: &WorldBlocksMove) {
-        let reverse = WorldBlocksMove { from: action.to, to: action.from };
+    fn restore(&mut self, action: &Move) {
+        let reverse = Move { from: action.to, to: action.from };
         self.apply(&reverse)
     }
 
-    fn actions(&self) -> Vec<WorldBlocksMove> {
+    fn weighted_actions(&self) -> Vec<WeightedAction<Move, NbMoves>> {
         let mut actions = Vec::with_capacity(self.nb_stacks() * (self.nb_stacks() - 1));
-        for from in 0..self.nb_stacks() {
-            for to in from + 1..self.nb_stacks() {
-                if !self.is_empty_stack(from) {
-                    actions.push(WorldBlocksMove { from, to });
+        for lhs in 0..self.nb_stacks() as Stack {
+            for rhs in lhs + 1..self.nb_stacks() as Stack {
+                if !self.is_empty_stack(lhs) {
+                    actions.push(WeightedAction::new(Move { from: lhs, to: rhs }, NbMoves(1)));
                 }
-                if !self.is_empty_stack(to) {
-                    actions.push(WorldBlocksMove { from: to, to: from });
+                if !self.is_empty_stack(rhs) {
+                    actions.push(WeightedAction::new(Move { from: rhs, to: lhs }, NbMoves(1)));
                 }
             }
         }
